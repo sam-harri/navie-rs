@@ -160,6 +160,7 @@ pub fn solve_poisson_equation_direct(
             b.nrows(), b.ncols(), nx, ny
         ));
     }
+    println!("shape of b: {:?}", b.shape());
 
     // Construct the matrix A for the Poisson equation
     let mut abig = construct_poisson_matrix(nx, ny, dx, dy);

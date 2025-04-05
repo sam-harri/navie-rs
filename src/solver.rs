@@ -13,9 +13,9 @@ use crate::numerical::{
     calculate_nu, calculate_nv,
     calculate_intermediate_velocity,
     calculate_divergence_term,
-    solve_poisson_equation_direct,
     apply_pressure_corrections,
 };
+use crate::poisson::solve_poisson_equation_direct;
 // --- End of assumed imports ---
 
 
@@ -60,117 +60,88 @@ impl Solver {
 
     /// Performs one time step using the fractional step method.
     pub fn step(&mut self) -> Result<(), String> {
-        let step_span = info_span!("solver_step", time = %self.time).entered();
-        
         // --- Apply BCs to current velocity ---
-        let _bc_span = info_span!("apply_boundary_conditions").entered();
         self.grid.apply_lid_driven_bcs(1.0);
-        info!("Applied initial boundary conditions");
-        drop(_bc_span);
 
         // --- Calculate Viscous Terms ---
-        let _viscous_span = info_span!("viscous_terms").entered();
         let lux = calculate_viscous_x(&self.grid.u, self.dx);
         let luy = calculate_viscous_y(&self.grid.u, self.dy);
         let lvx = calculate_viscous_x(&self.grid.v, self.dx);
         let lvy = calculate_viscous_y(&self.grid.v, self.dy);
-        info!("Calculated viscous terms");
-        drop(_viscous_span);
 
         // --- Calculate Convective Terms ---
-        let _convective_span = info_span!("convective_terms").entered();
         // 1. Interpolate
         let uce = interpolate_u_to_cell_centers(&self.grid.u);
         let uco = interpolate_u_to_cell_edges(&self.grid.u);
         let vco = interpolate_v_to_cell_edges(&self.grid.v);
         let vce = interpolate_v_to_cell_centers(&self.grid.v);
-        info!("Completed velocity interpolations");
 
         // 2. Multiply
         let uuce = uce.component_mul(&uce);
         let uvco = uco.component_mul(&vco);
         let vvce = vce.component_mul(&vce);
-        info!("Completed velocity products");
 
         // 3. Calculate Nu and Nv derivatives
         let nu = calculate_nu(&uuce, &uvco, self.dx, self.dy);
         let nv = calculate_nv(&vvce, &uvco, self.dx, self.dy);
-        info!("Calculated convective derivatives");
-        drop(_convective_span);
 
         // --- Predictor Step ---
-        let _predictor_span = info_span!("predictor_step").entered();
         let (mut u_star, mut v_star) = calculate_intermediate_velocity(
             &self.grid.u, &self.grid.v,
             &nu, &nv,
             &lux, &luy, &lvx, &lvy,
             self.dt, self.re
         );
-        info!("Calculated intermediate velocities");
-        drop(_predictor_span);
 
         // --- Calculate Divergence ---
-        let _div_span = info_span!("divergence_calculation").entered();
         let b = calculate_divergence_term(&u_star, &v_star, self.dx, self.dy);
-        info!("Calculated divergence of intermediate velocity");
-        drop(_div_span);
 
         // --- Solve Pressure Poisson Equation ---
-        let _poisson_span = info_span!("pressure_poisson").entered();
         let p = match solve_poisson_equation_direct(&b, self.nx, self.ny, self.dx, self.dy, false) {
-            Ok(p) => {
-                info!("Solved pressure Poisson equation");
-                p
-            },
+            Ok(p) => p,
             Err(e) => {
-                warn!("Failed to solve pressure equation: {}", e);
                 return Err(e);
             }
         };
         self.grid.pressure = p.clone();
-        drop(_poisson_span);
 
         // --- Corrector Step ---
-        let _corrector_span = info_span!("corrector_step").entered();
         apply_pressure_corrections(&mut u_star, &mut v_star, &p, self.dx, self.dy);
-        info!("Applied pressure corrections to velocity");
 
         // Update grid velocities
         self.grid.u = u_star;
         self.grid.v = v_star;
-        info!("Updated final velocity fields");
-        drop(_corrector_span);
 
         // --- Final BCs ---
-        let _final_bc_span = info_span!("final_boundary_conditions").entered();
         self.grid.apply_lid_driven_bcs(1.0);
-        info!("Applied final boundary conditions");
-        drop(_final_bc_span);
 
         // --- Advance Time ---
         self.time += self.dt;
-        info!(time = %self.time, "Completed time step");
         
-        drop(step_span);
         Ok(())
     }
 
     /// Runs the simulation for a specified number of time steps.
     pub fn run(&mut self, num_steps: usize) -> Result<(), String> {
         let run_span = info_span!("simulation_run", num_steps = num_steps).entered();
-        info!(time = %self.time, "Starting simulation run");
+        info!("Starting simulation with {} steps", num_steps);
+        
+        let start_time = std::time::Instant::now();
         
         for i in 0..num_steps {
             let step_span = info_span!("time_step", step = i + 1).entered();
+            let step_start = std::time::Instant::now();
+            
             match self.step() {
                 Ok(_) => {
-                    if (i + 1) % 10 == 0 || i == num_steps - 1 || i == 0 {
-                        info!(
-                            step = i + 1,
-                            time = %self.time,
-                            "Completed step"
-                        );
-                    }
+                    // Calculate divergence for monitoring
+                    let b_check = calculate_divergence_term(&self.grid.u, &self.grid.v, self.dx, self.dy);
+                    let div_norm = b_check.norm();
+                    
+                    // Log step time and divergence
+                    let step_time = step_start.elapsed();
+                    info!("Step {}: time={:.4}, div={:.3e}, elapsed={:.2}ms", 
+                          i + 1, self.time, div_norm, step_time.as_millis());
                 }
                 Err(e) => {
                     let error_msg = format!("Error during step {}: {}", i + 1, e);
@@ -181,7 +152,9 @@ impl Solver {
             drop(step_span);
         }
         
-        info!(time = %self.time, "Simulation run finished");
+        let total_time = start_time.elapsed();
+        info!("Simulation finished in {:.2}s", total_time.as_secs_f64());
+        
         drop(run_span);
         Ok(())
     }
