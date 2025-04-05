@@ -1,3 +1,4 @@
+#![allow(dead_code)] // Allow unused code for example purposes
 use crate::error::BoundaryError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

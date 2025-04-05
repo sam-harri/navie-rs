@@ -1,3 +1,4 @@
+#![allow(dead_code)] // Allow unused code for example purposes
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -14,5 +15,7 @@ pub enum BoundaryError {
 
 #[derive(Error, Debug, Clone)]
 pub enum SolverError {
-
+    #[error("Invalid parameter: {0}")]
+    InvalidParameter(String),
+    
 }

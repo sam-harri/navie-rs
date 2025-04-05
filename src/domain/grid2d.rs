@@ -1,166 +1,189 @@
-use std::mem;
+#![allow(dead_code)] // Allow unused code for example purposes
 
-use ndarray::{Array1, Array2, ArrayView1};
+use nalgebra::DMatrix; // Only need DMatrix
 use crate::error::GridError;
 use crate::boundary::bc2d::{BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridDimensions2D(pub usize, pub usize);
+pub struct GridDimensions2D(pub usize, pub usize); // nx, ny (interior cells)
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CellSize2D(pub f64, pub f64); 
+pub struct CellSize2D(pub f64, pub f64); // dx, dy
 
 #[derive(Debug, Clone)]
 pub struct Grid2D {
     pub dimensions: GridDimensions2D,
     pub cell_size: CellSize2D,
-    pub pressure: Array2<f64>,
-    pub u: Array2<f64>,
-    pub v: Array2<f64>,
+    pub pressure: DMatrix<f64>, // nx x ny
+    pub u: DMatrix<f64>,        // (nx+1) x (ny+2)
+    pub v: DMatrix<f64>,        // (nx+2) x (ny+1)
 }
 
 impl Grid2D {
-    /// Create a new computational grid wth 3 cells by 6 cells
-    /// the pressure field is 5x8
-    /// the u field is 5x7
-    /// the v field is 4x8
-    /// •   →   •   →   •   →   •   →   •   →   •   →   •   →   •
-    ///     |       |       |       |       |       |       |    
+    ///     →       →       →       →       →       →       →
+    ///     |       |       |       |       |       |       |
     /// ↑ - ❖ - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - ❖ - ↑
-    ///     |       |       |       |       |       |       |    
-    /// •   →   •   →   •   →   •   →   •   →   •   →   •   →   •
-    ///     |       |       |       |       |       |       |    
+    ///     |       |       |       |       |       |       |
+    ///     →   •   →   •   →   •   →   •   →   •   →   •   →
+    ///     |       |       |       |       |       |       |
     /// ↑ - ❖ - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - ❖ - ↑
-    ///     |       |       |       |       |       |       |    
-    /// •   →   •   →   •   →   •   →   •   →   •   →   •   →   •
-    ///     |       |       |       |       |       |       |    
+    ///     |       |       |       |       |       |       |
+    ///     →   •   →   •   →   •   →   •   →   •   →   •   →
+    ///     |       |       |       |       |       |       |
     /// ↑ - ❖ - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - ❖ - ↑
-    ///     |       |       |       |       |       |       |    
-    /// •   →   •   →   •   →   •   →   •   →   •   →   •   →   •
-    ///     |       |       |       |       |       |       |    
+    ///     |       |       |       |       |       |       |
+    ///     →   •   →   •   →   •   →   •   →   •   →   •   →
+    ///     |       |       |       |       |       |       |
     /// ↑ - ❖ - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - + - ↑ - ❖ - ↑
-    ///     |       |       |       |       |       |       |    
-    /// •   →   •   →   •   →   •   →   •   →   •   →   •   →   •
+    ///     |       |       |       |       |       |       |
+    ///     →       →       →       →       →       →       →
     pub fn new(dimensions: GridDimensions2D, cell_size: CellSize2D) -> Result<Self, GridError> {
         let GridDimensions2D(nx, ny) = dimensions;
-
-        if nx <= 2 || ny <= 2 {
-            return Err(GridError::InvalidGridSize(
-                "Grid dimensions must be greater than two.".to_string(),
-            ));
+        if nx < 1 || ny < 1 {
+             return Err(GridError::InvalidGridSize(
+                 "Grid dimensions (nx, ny) must be at least 1x1 for interior cells.".to_string(),
+             ));
         }
-
-
         Ok(Self {
             dimensions,
             cell_size,
-            pressure: Array2::<f64>::zeros((nx + 2, ny + 2)),
-            u: Array2::<f64>::zeros((nx + 1, ny + 2)), // Staggered in x
-            v: Array2::<f64>::zeros((nx + 2, ny + 1)), // Staggered in y
+            pressure: DMatrix::<f64>::zeros(nx, ny),
+            u: DMatrix::<f64>::zeros(nx + 1, ny + 2),
+            v: DMatrix::<f64>::zeros(nx + 2, ny + 1),
         })
     }
 
+    /// Applies boundary conditions to the u and v fields by setting ghost cell values.
+    /// Mirrors the specific sequential logic from the MATLAB example for lid-driven cavity.
     pub fn apply_boundary_conditions(&mut self, bcs: BoundaryConditions2D) {
-        let BoundaryConditions2D { u, v, p } = bcs;
-        self.u = Self::bc(mem::take(&mut self.u), u);
-        self.v = Self::bc(mem::take(&mut self.v), v);
-        self.pressure = Self::bc(mem::take(&mut self.pressure), p);
+        // Only handle Dirichlet BCs for velocity matching the MATLAB snippet provided
+        Self::apply_velocity_bc(&mut self.u, bcs.u);
+        Self::apply_velocity_bc(&mut self.v, bcs.v);
     }
 
-    pub fn bc(mut domain: Array2<f64>, bc: SquareBoundary) -> Array2<f64> {
-        let FaceBoundary(x_lower, x_upper) = bc.x;
-        let FaceBoundary(y_lower, y_upper) = bc.y;
+    /// Applies velocity BCs mimicking the MATLAB script's sequential logic
+    /// and specific Dirichlet conditions for the lid-driven cavity.
+    /// NOTE: Uses Rust's 0-based indexing.
+    pub fn apply_velocity_bc(field: &mut DMatrix<f64>, bc: SquareBoundary) {
+        let nrows = field.nrows();
+        let ncols = field.ncols();
+        // Need at least 2 rows/cols for basic ghost+interior setup
+        if nrows < 2 || ncols < 2 {
+             eprintln!("Warning: Field dimensions ({nrows}x{ncols}) too small for BC application. Skipping.");
+             return;
+        }
 
-        let nrows = domain.nrows();
-        let ncols = domain.ncols();
+        let FaceBoundary(x_lower_bc, x_upper_bc) = bc.x; // Left, Right
+        let FaceBoundary(y_lower_bc, y_upper_bc) = bc.y; // Bottom, Top
 
-        let new_top = Self::replacement_vec(y_upper, Some(domain.row(1)), ncols);
-        let new_bottom = Self::replacement_vec(y_lower, Some(domain.row(nrows - 2)), ncols);
-        let new_left = Self::replacement_vec(x_lower, Some(domain.column(1)), nrows);
-        let new_right = Self::replacement_vec(x_upper, Some(domain.column(ncols - 2)), nrows);
-
-        domain.row_mut(0).assign(&new_top);
-        domain.row_mut(nrows - 1).assign(&new_bottom);
-        domain.column_mut(0).assign(&new_left);
-        domain.column_mut(ncols - 1).assign(&new_right);
-
-        domain[[0, 0]] = 0.5 * (domain[[1, 0]] + domain[[0, 1]]);
-        domain[[0, ncols - 1]] = 0.5 * (domain[[0, ncols - 2]] + domain[[1, ncols - 1]]);
-        domain[[nrows - 1, 0]] = 0.5 * (domain[[nrows - 2, 0]] + domain[[nrows - 1, 1]]);
-        domain[[nrows - 1, ncols - 1]] = 0.5 * (domain[[nrows - 2, ncols - 1]] + domain[[nrows - 1, ncols - 2]]);
-
-        domain
-    }
-
-    pub fn replacement_vec(
-        bc: BoundaryCondition,
-        interior: Option<ArrayView1<f64>>,
-        size: usize,
-    ) -> Array1<f64> {
-        match bc {
-            BoundaryCondition::Dirichlet(scalar) => Array1::from_elem(size, scalar),
-            BoundaryCondition::Neumann => {
-                interior
-                    .expect("Neumann boundary condition requires an interior row/column. Typically caused by a domain containing 2 cells or less in the direction of the Neuman Boundary")
-                    .to_owned()
+        // Check that all boundaries are Dirichlet type
+        match (x_lower_bc, x_upper_bc, y_lower_bc, y_upper_bc) {
+            (BoundaryCondition::Dirichlet(left), BoundaryCondition::Dirichlet(right), 
+             BoundaryCondition::Dirichlet(bottom), BoundaryCondition::Dirichlet(top)) => {
+                // Apply Dirichlet BCs using the MATLAB approach where the average between the two ghost cells
+                // equals the boundary condition value
+                
+                // Left boundary (x_lower)
+                for i in 0..nrows {
+                    field[(i, 0)] = 2.0 * left - field[(i, 1)];
+                }
+                
+                // Right boundary (x_upper)
+                for i in 0..nrows {
+                    field[(i, ncols-1)] = 2.0 * right - field[(i, ncols-2)];
+                }
+                // Top boundary (y_upper)
+                for j in 0..ncols {
+                    field[(0, j)] = 2.0 * top - field[(1, j)];
+                }
+                
+                // Bottom boundary (y_lower)
+                for j in 0..ncols {
+                    field[(nrows-1, j)] = 2.0 * bottom - field[(nrows-2, j)];
+                }
+                
             }
+            _ => panic!("All boundary conditions must be Dirichlet type")
         }
     }
-
-    
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array2;
+    use nalgebra::dmatrix;
+    use crate::boundary::bc2d::*;
+    use approx::assert_relative_eq;
 
     #[test]
-    fn test_bc_all_dirichlet() {
-        let domain = Array2::<f64>::from_shape_vec((3, 3), vec![
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0,
-        ]).unwrap();
-
-        let bc = SquareBoundary {
-            x: FaceBoundary(BoundaryCondition::Dirichlet(20.0), BoundaryCondition::Dirichlet(40.0)),
-            y: FaceBoundary(BoundaryCondition::Dirichlet(10.0), BoundaryCondition::Dirichlet(30.0)),
-        };
-
-        let updated = Grid2D::bc(domain, bc);
-
-        let expected = Array2::<f64>::from_shape_vec((3, 3), vec![
-            25.0, 30.0, 35.0,
-            20.0, 0.0, 40.0,
-            15.0, 10.0, 25.0,
-        ]).unwrap();
-        assert_eq!(updated, expected);
+    fn test_grid_creation() {
+        let dims = GridDimensions2D(3, 6);
+        let cell_size = CellSize2D(0.1, 0.1);
+        let grid = Grid2D::new(dims, cell_size).unwrap();
+        assert_eq!(grid.dimensions, dims);
+        assert_eq!(grid.cell_size, cell_size);
+        assert_eq!(grid.pressure.nrows(), 3); assert_eq!(grid.pressure.ncols(), 6);
+        assert_eq!(grid.u.nrows(), 4); assert_eq!(grid.u.ncols(), 8); // (nx+1) x (ny+2) = 4x8
+        assert_eq!(grid.v.nrows(), 5); assert_eq!(grid.v.ncols(), 7); // (nx+2) x (ny+1) = 5x7
     }
-
+    
+     #[test]
+    fn test_grid_creation_invalid_size() {
+        let dims = GridDimensions2D(0, 5);
+        let cell_size = CellSize2D(0.1, 0.1);
+        assert!(Grid2D::new(dims, cell_size).is_err());
+        let dims = GridDimensions2D(5, 0);
+        assert!(Grid2D::new(dims, cell_size).is_err());
+    }
+    
     #[test]
-    fn test_bc_all_neumann() {
-        let domain = Array2::<f64>::from_shape_vec((4, 4), vec![
-            0.0, 0.0, 0.0, 0.0,
-            0.0, 2.0, 2.0, 0.0,
-            0.0, 4.0, 2.0, 0.0,
-            0.0, 0.0, 0.0, 0.0,
-        ]).unwrap();
-
-        let bc = SquareBoundary {
+    fn test_apply_boundary_conditions_lid_driven() {
+        let dims = GridDimensions2D(2, 2); // nx=2, ny=2
+        let cell_size = CellSize2D(0.5, 0.5);
+        let mut grid = Grid2D::new(dims, cell_size).unwrap();
+    
+        let bctop = 1.0;
+        let u_bc = SquareBoundary {
+            x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
+            y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(bctop)),
+        };
+        let v_bc = SquareBoundary {
+            x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
+            y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
+        };
+         let p_bc = SquareBoundary {
             x: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
             y: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
-        };
+         };
+         let bcs = BoundaryConditions2D { u: u_bc, v: v_bc, p: p_bc };
+    
+        // Apply BCs using the MATLAB-style function
+        Grid2D::apply_velocity_bc(&mut grid.u, bcs.u);
+        Grid2D::apply_velocity_bc(&mut grid.v, bcs.v);
 
-        let updated = Grid2D::bc(domain, bc);
+        // Based on the ASCII diagram, the top boundary should have a value of 1.0
+        // and the ghost cells should be set to 2.0 to ensure the average is 1.0
+        let expected_u = dmatrix![
+            2.0, 2.0, 2.0, 2.0;
+            0.0, 0.0, 0.0, 0.0;
+            0.0, 0.0, 0.0, 0.0;
+        ];
+    
+         let expected_v = dmatrix![
+            0.0, 0.0, 0.0;
+            0.0, 0.0, 0.0;
+            0.0, 0.0, 0.0;
+            0.0, 0.0, 0.0;
+        ];
+    
+        println!("Expected u:\n{}", expected_u);
+        println!("Computed u:\n{}", grid.u);
 
-        let expected = Array2::<f64>::from_shape_vec((4, 4), vec![
-            2.0, 2.0, 2.0, 2.0,
-            2.0, 2.0, 2.0, 2.0,
-            4.0, 4.0, 4.0, 4.0,
-            4.0, 4.0, 4.0, 4.0,
-        ]).unwrap();
-        assert_eq!(updated, expected);
+        println!("Expected v:\n{}", expected_v);
+        println!("Computed v:\n{}", grid.v);
+
+        assert_relative_eq!(grid.u, expected_u, epsilon = 1e-9);
+        assert_relative_eq!(grid.v, expected_v, epsilon = 1e-9);
     }
 }
-    
