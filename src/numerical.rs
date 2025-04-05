@@ -145,7 +145,6 @@ pub fn calculate_divergence(
     dudx + dvdy
 }
 
-// TODO: Implement the Poisson solver
 pub fn solve_poisson_equation_direct(
     b: &DMatrix<f64>,
     nx: usize,

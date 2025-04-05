@@ -2,6 +2,7 @@
 use crate::domain::grid2d::Grid2D;
 use crate::boundary::bc2d::BoundaryConditions2D;
 use crate::error::SolverError;
+use tracing::{info, info_span, warn};
 
 // --- Assume these functions exist in the same module or are imported ---
 // --- from your previous code files (lib.rs or wherever they are)   ---
@@ -59,96 +60,129 @@ impl Solver {
 
     /// Performs one time step using the fractional step method.
     pub fn step(&mut self) -> Result<(), String> {
-        // --- Apply BCs to current velocity (often done at start/end of step) ---
-        // Using the specific method from Grid2D that handles Dirichlet
-        Grid2D::apply_velocity_bc(&mut self.grid.u, self.bcs.u);
-        Grid2D::apply_velocity_bc(&mut self.grid.v, self.bcs.v);
+        let step_span = info_span!("solver_step", time = %self.time).entered();
+        
+        // --- Apply BCs to current velocity ---
+        let _bc_span = info_span!("apply_boundary_conditions").entered();
+        self.grid.apply_lid_driven_bcs(1.0);
+        info!("Applied initial boundary conditions");
+        drop(_bc_span);
 
         // --- Calculate Viscous Terms ---
-        let lux = calculate_viscous_x(&self.grid.u, self.dx); // Size 4x5
-        let luy = calculate_viscous_y(&self.grid.u, self.dy); // Size 4x5
-        let lvx = calculate_viscous_x(&self.grid.v, self.dx); // Size 5x4
-        let lvy = calculate_viscous_y(&self.grid.v, self.dy); // Size 5x4
+        let _viscous_span = info_span!("viscous_terms").entered();
+        let lux = calculate_viscous_x(&self.grid.u, self.dx);
+        let luy = calculate_viscous_y(&self.grid.u, self.dy);
+        let lvx = calculate_viscous_x(&self.grid.v, self.dx);
+        let lvy = calculate_viscous_y(&self.grid.v, self.dy);
+        info!("Calculated viscous terms");
+        drop(_viscous_span);
 
         // --- Calculate Convective Terms ---
+        let _convective_span = info_span!("convective_terms").entered();
         // 1. Interpolate
-        let uce = interpolate_u_to_cell_centers(&self.grid.u); // Size 5x5
-        let uco = interpolate_u_to_cell_edges(&self.grid.u);   // Size 6x6
-        let vco = interpolate_v_to_cell_edges(&self.grid.v);   // Size 6x6
-        let vce = interpolate_v_to_cell_centers(&self.grid.v); // Size 5x5
+        let uce = interpolate_u_to_cell_centers(&self.grid.u);
+        let uco = interpolate_u_to_cell_edges(&self.grid.u);
+        let vco = interpolate_v_to_cell_edges(&self.grid.v);
+        let vce = interpolate_v_to_cell_centers(&self.grid.v);
+        info!("Completed velocity interpolations");
 
         // 2. Multiply
-        let uuce = uce.component_mul(&uce); // Size 5x5
-        let uvco = uco.component_mul(&vco); // Size 6x6
-        let vvce = vce.component_mul(&vce); // Size 5x5
+        let uuce = uce.component_mul(&uce);
+        let uvco = uco.component_mul(&vco);
+        let vvce = vce.component_mul(&vce);
+        info!("Completed velocity products");
 
         // 3. Calculate Nu and Nv derivatives
-        let nu = calculate_nu(&uuce, &uvco, self.dx, self.dy); // Size 4x5
-        let nv = calculate_nv(&vvce, &uvco, self.dx, self.dy); // Size 5x4
+        let nu = calculate_nu(&uuce, &uvco, self.dx, self.dy);
+        let nv = calculate_nv(&vvce, &uvco, self.dx, self.dy);
+        info!("Calculated convective derivatives");
+        drop(_convective_span);
 
-        // --- Predictor Step: Get Intermediate Velocity ---
-        // Use the dedicated function now
-        let (u_star, v_star) = calculate_intermediate_velocity(
+        // --- Predictor Step ---
+        let _predictor_span = info_span!("predictor_step").entered();
+        let (mut u_star, mut v_star) = calculate_intermediate_velocity(
             &self.grid.u, &self.grid.v,
             &nu, &nv,
             &lux, &luy, &lvx, &lvy,
             self.dt, self.re
         );
-        // u_star, v_star hold the intermediate velocities
+        info!("Calculated intermediate velocities");
+        drop(_predictor_span);
 
-        // --- Calculate Divergence of Intermediate Velocity ---
-        let b = calculate_divergence_term(&u_star, &v_star, self.dx, self.dy); // Size 5x5
+        // --- Calculate Divergence ---
+        let _div_span = info_span!("divergence_calculation").entered();
+        let b = calculate_divergence_term(&u_star, &v_star, self.dx, self.dy);
+        info!("Calculated divergence of intermediate velocity");
+        drop(_div_span);
 
         // --- Solve Pressure Poisson Equation ---
-        // Use verify=false in typical simulation steps for performance
-        let p = solve_poisson_equation_direct(&b, self.nx, self.ny, self.dx, self.dy, true)?; // Size 5x5
-        self.grid.pressure = p.clone(); // Store pressure if needed
+        let _poisson_span = info_span!("pressure_poisson").entered();
+        let p = match solve_poisson_equation_direct(&b, self.nx, self.ny, self.dx, self.dy, false) {
+            Ok(p) => {
+                info!("Solved pressure Poisson equation");
+                p
+            },
+            Err(e) => {
+                warn!("Failed to solve pressure equation: {}", e);
+                return Err(e);
+            }
+        };
+        self.grid.pressure = p.clone();
+        drop(_poisson_span);
 
-        // --- Corrector Step: Update Velocity with Pressure ---
-        // Apply correction IN PLACE to u_star, v_star
-        // Need mutable references for apply_pressure_corrections
-        let mut u_corrected = u_star; // Take ownership
-        let mut v_corrected = v_star; // Take ownership
-        apply_pressure_corrections(&mut u_corrected, &mut v_corrected, &p, self.dx, self.dy);
+        // --- Corrector Step ---
+        let _corrector_span = info_span!("corrector_step").entered();
+        apply_pressure_corrections(&mut u_star, &mut v_star, &p, self.dx, self.dy);
+        info!("Applied pressure corrections to velocity");
 
-        // --- Update grid velocities with the final corrected values ---
-        self.grid.u = u_corrected;
-        self.grid.v = v_corrected;
+        // Update grid velocities
+        self.grid.u = u_star;
+        self.grid.v = v_star;
+        info!("Updated final velocity fields");
+        drop(_corrector_span);
 
-        // --- Apply BCs to the final velocity field ---
-        // Often done here to ensure boundaries are correct for the next step
-        Grid2D::apply_velocity_bc(&mut self.grid.u, self.bcs.u);
-        Grid2D::apply_velocity_bc(&mut self.grid.v, self.bcs.v);
+        // --- Final BCs ---
+        let _final_bc_span = info_span!("final_boundary_conditions").entered();
+        self.grid.apply_lid_driven_bcs(1.0);
+        info!("Applied final boundary conditions");
+        drop(_final_bc_span);
 
         // --- Advance Time ---
         self.time += self.dt;
-
+        info!(time = %self.time, "Completed time step");
+        
+        drop(step_span);
         Ok(())
     }
 
     /// Runs the simulation for a specified number of time steps.
     pub fn run(&mut self, num_steps: usize) -> Result<(), String> {
-        println!("Starting simulation run...");
-        println!("Initial time: {:.4}", self.time);
+        let run_span = info_span!("simulation_run", num_steps = num_steps).entered();
+        info!(time = %self.time, "Starting simulation run");
+        
         for i in 0..num_steps {
+            let step_span = info_span!("time_step", step = i + 1).entered();
             match self.step() {
                 Ok(_) => {
-                    // Optional: Print progress
                     if (i + 1) % 10 == 0 || i == num_steps - 1 || i == 0 {
-                         println!("Completed step {}: time = {:.4}", i + 1, self.time);
-                         // Optional: Check divergence norm
-                         // let b_check = calculate_divergence_term(&self.grid.u, &self.grid.v, self.dx, self.dy);
-                         // println!("  -> Divergence norm: {:.3e}", b_check.norm());
+                        info!(
+                            step = i + 1,
+                            time = %self.time,
+                            "Completed step"
+                        );
                     }
                 }
                 Err(e) => {
                     let error_msg = format!("Error during step {}: {}", i + 1, e);
-                    eprintln!("{}", error_msg);
+                    warn!(%error_msg, "Simulation step failed");
                     return Err(error_msg);
                 }
             }
+            drop(step_span);
         }
-        println!("Simulation run finished. Final time: {:.4}", self.time);
+        
+        info!(time = %self.time, "Simulation run finished");
+        drop(run_span);
         Ok(())
     }
 }

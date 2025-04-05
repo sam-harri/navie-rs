@@ -9,13 +9,28 @@ mod solver; // Contains solver.rs
 use crate::domain::grid2d::{Grid2D, GridDimensions2D, CellSize2D};
 use crate::boundary::bc2d::{BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary};
 use crate::solver::Solver;
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> { // Use standard Error trait
-    println!("Setting up Lid-Driven Cavity Simulation...");
+    // Initialize the tracing subscriber
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_thread_names(false)
+        .with_level(true)
+        .with_ansi(true)
+        .pretty()
+        .init();
+
+    info!("Setting up Lid-Driven Cavity Simulation...");
 
     // --- Simulation Parameters (Matching MATLAB) ---
     let re = 500.0;         // Reynolds number
-    let num_steps = 2000;   // Total time steps
+    let num_steps = 10;   // Total time steps
     let dt = 0.01;          // Time step
     let grid_dims = GridDimensions2D(80, 80);
     let cell_size = CellSize2D(1.0/80.0, 1.0/80.0);
@@ -58,21 +73,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> { // Use standard Error trai
             }
         }
     }
-
-    println!("------------------------------------");
-    println!("Simulation finished successfully.");
-    println!("Final time: {:.4}", solver.time);
-
-    // --- Print Final State (or save to file, etc.) ---
-    // Printing large matrices might be slow/unwieldy. Print samples?
-    println!("\nFinal u velocity (sample top-left 4x4 interior):");
-    println!("{}", solver.grid.u.fixed_view::<4, 4>(1, 1)); // View from (1,1) size 4x4
-
-    println!("\nFinal v velocity (sample top-left 4x4 interior):");
-    println!("{}", solver.grid.v.fixed_view::<4, 4>(1, 1)); // View from (1,1) size 4x4
-
-    println!("\nFinal pressure (sample top-left 4x4):");
-    println!("{}", solver.grid.pressure.fixed_view::<4, 4>(0, 0)); // View from (0,0) size 4x4
 
     Ok(())
 }

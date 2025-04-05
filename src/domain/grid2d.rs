@@ -2,7 +2,6 @@
 
 use nalgebra::DMatrix; // Only need DMatrix
 use crate::error::GridError;
-use crate::boundary::bc2d::{BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridDimensions2D(pub usize, pub usize); // nx, ny (interior cells)
@@ -53,59 +52,98 @@ impl Grid2D {
         })
     }
 
-    /// Applies boundary conditions to the u and v fields by setting ghost cell values.
-    /// Mirrors the specific sequential logic from the MATLAB example for lid-driven cavity.
-    pub fn apply_boundary_conditions(&mut self, bcs: BoundaryConditions2D) {
-        // Only handle Dirichlet BCs for velocity matching the MATLAB snippet provided
-        Self::apply_velocity_bc(&mut self.u, bcs.u);
-        Self::apply_velocity_bc(&mut self.v, bcs.v);
+    pub fn apply_lid_driven_bcs(&mut self, bctop: f64) {
+        let GridDimensions2D(nx, ny) = self.dimensions;
+
+        // Dimensions including ghost cells
+        let u_nrows = nx + 1; // 6 (Indices 0..=5)
+        let u_ncols = ny + 2; // 7 (Indices 0..=6)
+        let v_nrows = nx + 2; // 7 (Indices 0..=6)
+        let v_ncols = ny + 1; // 6 (Indices 0..=5)
+
+        if u_nrows < 2 || u_ncols < 2 || v_nrows < 2 || v_ncols < 2 { return; }
+
+        // --- Apply BCs to u field (horizontal velocity, 6x7) ---
+        // Indices: u[x_idx, y_idx] where x_idx = 0..nx, y_idx = 0..ny+1
+
+        // Left Wall (x=0): u=0 (no penetration). Set boundary u values.
+        // Corresponds to u[0, c] for interior y points c=1..ny
+        for c in 1..=ny { self.u[(0, c)] = 0.0; }
+        // Also set ghost corners
+        self.u[(0, 0)] = 0.0;      // Bottom-left ghost
+        self.u[(0, ny + 1)] = 0.0; // Top-left ghost
+
+        // Right Wall (x=Lx): u=0 (no penetration). Set boundary u values.
+        // Corresponds to u[nx, c] for interior y points c=1..ny
+        for c in 1..=ny { self.u[(nx, c)] = 0.0; }
+        // Also set ghost corners
+        self.u[(nx, 0)] = 0.0;      // Bottom-right ghost
+        self.u[(nx, ny + 1)] = 0.0; // Top-right ghost
+
+        // Bottom Wall (y=0): u=0 (no slip). Set ghost column 0.
+        // u[r, 0] = -u[r, 1] for interior x points r=1..nx-1
+        for r in 1..nx { // r = 1..4 for nx=5
+             self.u[(r, 0)] = -self.u[(r, 1)];
+        }
+        // Use wall conditions for corners
+        self.u[(0, 0)] = 0.0; // Already set by left wall
+        self.u[(nx, 0)] = 0.0; // Already set by right wall
+
+
+        // Top Wall (Lid, y=Ly): u=bctop (tangential velocity). Set ghost column ny+1.
+        // u[r, ny+1] = 2*bctop - u[r, ny] for interior x points r=1..nx-1
+        let last_u_col = ny + 1;
+        let second_last_u_col = ny;
+        for r in 1..nx { // r = 1..4 for nx=5
+            self.u[(r, last_u_col)] = 2.0 * bctop - self.u[(r, second_last_u_col)];
+        }
+         // Use wall conditions for corners
+        self.u[(0, last_u_col)] = 0.0;       // Already set by left wall
+        self.u[(nx, last_u_col)] = 0.0;       // Already set by right wall
+
+
+        // --- Apply BCs to v field (vertical velocity, 7x6) ---
+        // Indices: v[x_idx, y_idx] where x_idx = 0..nx+1, y_idx = 0..ny
+
+        // Left Wall (x=0): v=0 (no slip). Set ghost row 0.
+        // v[0, c] = -v[1, c] for interior y points c=1..ny-1
+        for c in 1..ny { // c = 1..4 for ny=5
+            self.v[(0, c)] = -self.v[(1, c)];
+        }
+        // Use wall conditions for corners
+        self.v[(0, 0)] = 0.0;       // Consistent with Bottom wall v=0
+        self.v[(0, ny)] = 0.0;       // Consistent with Top wall v=0
+
+
+        // Right Wall (x=Lx): v=0 (no slip). Set ghost row nx+1.
+        // v[nx+1, c] = -v[nx, c] for interior y points c=1..ny-1
+        let last_v_row = nx + 1;
+        let second_last_v_row = nx;
+        for c in 1..ny { // c = 1..4 for ny=5
+            self.v[(last_v_row, c)] = -self.v[(second_last_v_row, c)];
+        }
+        // Use wall conditions for corners
+        self.v[(last_v_row, 0)] = 0.0; // Consistent with Bottom wall v=0
+        self.v[(last_v_row, ny)] = 0.0; // Consistent with Top wall v=0
+
+
+        // Bottom Wall (y=0): v=0 (no penetration). Set boundary v values.
+        // Corresponds to v[r, 0] for interior x points r=1..nx
+        for r in 1..=nx { self.v[(r, 0)] = 0.0; }
+        // Also set ghost corners
+        self.v[(0, 0)] = 0.0;          // Already set by left wall
+        self.v[(last_v_row, 0)] = 0.0; // Already set by right wall
+
+
+        // Top Wall (Lid, y=Ly): v=0 (no penetration). Set boundary v values.
+        // Corresponds to v[r, ny] for interior x points r=1..nx
+        let last_v_col = ny;
+        for r in 1..=nx { self.v[(r, last_v_col)] = 0.0; }
+         // Also set ghost corners
+        self.v[(0, last_v_col)] = 0.0;          // Already set by left wall
+        self.v[(last_v_row, last_v_col)] = 0.0; // Already set by right wall
     }
 
-    /// Applies velocity BCs mimicking the MATLAB script's sequential logic
-    /// and specific Dirichlet conditions for the lid-driven cavity.
-    /// NOTE: Uses Rust's 0-based indexing.
-    pub fn apply_velocity_bc(field: &mut DMatrix<f64>, bc: SquareBoundary) {
-        let nrows = field.nrows();
-        let ncols = field.ncols();
-        // Need at least 2 rows/cols for basic ghost+interior setup
-        if nrows < 2 || ncols < 2 {
-             eprintln!("Warning: Field dimensions ({nrows}x{ncols}) too small for BC application. Skipping.");
-             return;
-        }
-
-        let FaceBoundary(x_lower_bc, x_upper_bc) = bc.x; // Left, Right
-        let FaceBoundary(y_lower_bc, y_upper_bc) = bc.y; // Bottom, Top
-
-        // Check that all boundaries are Dirichlet type
-        match (x_lower_bc, x_upper_bc, y_lower_bc, y_upper_bc) {
-            (BoundaryCondition::Dirichlet(left), BoundaryCondition::Dirichlet(right), 
-             BoundaryCondition::Dirichlet(bottom), BoundaryCondition::Dirichlet(top)) => {
-                // Apply Dirichlet BCs using the MATLAB approach where the average between the two ghost cells
-                // equals the boundary condition value
-                
-                // Left boundary (x_lower)
-                for i in 0..nrows {
-                    field[(i, 0)] = 2.0 * left - field[(i, 1)];
-                }
-                
-                // Right boundary (x_upper)
-                for i in 0..nrows {
-                    field[(i, ncols-1)] = 2.0 * right - field[(i, ncols-2)];
-                }
-                // Top boundary (y_upper)
-                for j in 0..ncols {
-                    field[(0, j)] = 2.0 * top - field[(1, j)];
-                }
-                
-                // Bottom boundary (y_lower)
-                for j in 0..ncols {
-                    field[(nrows-1, j)] = 2.0 * bottom - field[(nrows-2, j)];
-                }
-                
-            }
-            _ => panic!("All boundary conditions must be Dirichlet type")
-        }
-    }
 }
 
 
@@ -113,19 +151,18 @@ impl Grid2D {
 mod tests {
     use super::*;
     use nalgebra::dmatrix;
-    use crate::boundary::bc2d::*;
     use approx::assert_relative_eq;
 
     #[test]
     fn test_grid_creation() {
-        let dims = GridDimensions2D(3, 6);
+        let dims = GridDimensions2D(5, 5);
         let cell_size = CellSize2D(0.1, 0.1);
         let grid = Grid2D::new(dims, cell_size).unwrap();
         assert_eq!(grid.dimensions, dims);
         assert_eq!(grid.cell_size, cell_size);
-        assert_eq!(grid.pressure.nrows(), 3); assert_eq!(grid.pressure.ncols(), 6);
-        assert_eq!(grid.u.nrows(), 4); assert_eq!(grid.u.ncols(), 8); // (nx+1) x (ny+2) = 4x8
-        assert_eq!(grid.v.nrows(), 5); assert_eq!(grid.v.ncols(), 7); // (nx+2) x (ny+1) = 5x7
+        assert_eq!(grid.pressure.nrows(), 5); assert_eq!(grid.pressure.ncols(), 5);
+        assert_eq!(grid.u.nrows(), 6); assert_eq!(grid.u.ncols(), 7); // (nx+1) x (ny+2) = 4x8
+        assert_eq!(grid.v.nrows(), 7); assert_eq!(grid.v.ncols(), 6); // (nx+2) x (ny+1) = 5x7
     }
     
      #[test]
@@ -139,42 +176,52 @@ mod tests {
     
     #[test]
     fn test_apply_boundary_conditions_lid_driven() {
-        let dims = GridDimensions2D(2, 2); // nx=2, ny=2
+        let dims = GridDimensions2D(5, 5);
         let cell_size = CellSize2D(0.5, 0.5);
         let mut grid = Grid2D::new(dims, cell_size).unwrap();
     
         let bctop = 1.0;
-        let u_bc = SquareBoundary {
-            x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-            y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(bctop)),
-        };
-        let v_bc = SquareBoundary {
-            x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-            y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-        };
-         let p_bc = SquareBoundary {
-            x: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
-            y: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
-         };
-         let bcs = BoundaryConditions2D { u: u_bc, v: v_bc, p: p_bc };
+
+        grid.u = dmatrix![
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5
+        ];
+
+        grid.v = dmatrix![
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5;
+            0.5, 0.5, 0.5, 0.5, 0.5, 0.5
+        ];
     
-        // Apply BCs using the MATLAB-style function
-        Grid2D::apply_velocity_bc(&mut grid.u, bcs.u);
-        Grid2D::apply_velocity_bc(&mut grid.v, bcs.v);
+        grid.apply_lid_driven_bcs(bctop);
 
         // Based on the ASCII diagram, the top boundary should have a value of 1.0
         // and the ghost cells should be set to 2.0 to ensure the average is 1.0
         let expected_u = dmatrix![
-            2.0, 2.0, 2.0, 2.0;
-            0.0, 0.0, 0.0, 0.0;
-            0.0, 0.0, 0.0, 0.0;
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
+            -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.5;
+            -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.5;
+            -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.5;
+            -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 1.5;
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         ];
     
          let expected_v = dmatrix![
-            0.0, 0.0, 0.0;
-            0.0, 0.0, 0.0;
-            0.0, 0.0, 0.0;
-            0.0, 0.0, 0.0;
+            0.0, -0.5,-0.5,-0.5,-0.5, 0.0;
+            0.0, 0.5, 0.5, 0.5, 0.5, 0.0;
+            0.0, 0.5, 0.5, 0.5, 0.5, 0.0;
+            0.0, 0.5, 0.5, 0.5, 0.5, 0.0;
+            0.0, 0.5, 0.5, 0.5, 0.5, 0.0;
+            0.0, 0.5, 0.5, 0.5, 0.5, 0.0;
+            0.0, -0.5,-0.5,-0.5,-0.5, 0.0;
         ];
     
         println!("Expected u:\n{}", expected_u);
