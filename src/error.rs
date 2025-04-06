@@ -13,9 +13,28 @@ pub enum BoundaryError {
     InvalidBoundaryCondition(String),
 }
 
-#[derive(Error, Debug, Clone)]
+#[derive(Error, Debug)]
 pub enum SolverError {
+    #[error("Invalid grid dimensions: {0}")]
+    InvalidGridDimensions(String),
+
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
-    
+
+    #[error("Boundary condition error: {0}")]
+    BoundaryConditionError(String), // Example if you have BC errors
+
+    #[error("Poisson solver failed: {0}")]
+    PoissonError(String), // Example
+
+    // --- Add this variant ---
+    #[error("I/O error: {0}")]
+    IoError(String), // Wraps the io::Error message as a string
+
+    // Example of wrapping the actual io::Error if needed
+    // #[error("I/O error")]
+    // IoError(#[from] std::io::Error),
+
+    #[error("Unknown error: {0}")]
+    Other(String),
 }
