@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Allow unused code for example purposes
+#![allow(dead_code)]
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -22,18 +22,13 @@ pub enum SolverError {
     InvalidParameter(String),
 
     #[error("Boundary condition error: {0}")]
-    BoundaryConditionError(String), // Example if you have BC errors
+    BoundaryConditionError(String),
 
     #[error("Poisson solver failed: {0}")]
-    PoissonError(String), // Example
+    PoissonError(String),
 
-    // --- Add this variant ---
     #[error("I/O error: {0}")]
-    IoError(String), // Wraps the io::Error message as a string
-
-    // Example of wrapping the actual io::Error if needed
-    // #[error("I/O error")]
-    // IoError(#[from] std::io::Error),
+    IoError(String),
 
     #[error("Unknown error: {0}")]
     Other(String),

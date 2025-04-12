@@ -1,10 +1,10 @@
-#![allow(dead_code)] // Allow unused code for example purposes
+#![allow(dead_code)]
 use crate::error::BoundaryError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BoundaryCondition {
-    Dirichlet(f64), // Fixed value, e.g., u = 1.0
-    Neumann,   // Fixed gradient at zero
+    Dirichlet(f64),
+    Neumann,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,12 +24,8 @@ pub struct BoundaryConditions2D {
 }
 
 impl SquareBoundary {
-    pub fn new(
-        x: FaceBoundary,
-        y: FaceBoundary,
-    ) -> Result<Self, BoundaryError> {
-        // valiation logic needs to be added
-        Ok(Self { x, y})
+    pub fn new(x: FaceBoundary, y: FaceBoundary) -> Result<Self, BoundaryError> {
+        Ok(Self { x, y })
     }
 }
 
@@ -39,7 +35,6 @@ impl BoundaryConditions2D {
         v: SquareBoundary,
         p: SquareBoundary,
     ) -> Result<Self, BoundaryError> {
-        // valiation logic needs to be added
         Ok(Self { u, v, p })
     }
 }

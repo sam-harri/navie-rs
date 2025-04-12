@@ -1,26 +1,18 @@
-// src/solver.rs
-
 #![allow(dead_code)]
+use crate::boundary::bc2d::BoundaryConditions2D;
 use crate::domain::grid2d::Grid2D;
-use crate::boundary::bc2d::BoundaryConditions2D; // Import bc2d itself for SquareBoundary
 use crate::error::SolverError;
-use tracing::{info, info_span, warn, error};
-use std::time::Instant;
 use std::io;
+use std::time::Instant;
+use tracing::{error, info, info_span, warn};
 
-// --- Local module imports ---
+use crate::json_io::JsonOutputManager;
 use crate::numerical::{
-    calculate_viscous_x, calculate_viscous_y,
-    // Interpolation now handled by JsonOutputManager
-    // interpolate_u_to_cell_centers, interpolate_v_to_cell_centers,
+    apply_pressure_corrections, calculate_divergence_term, calculate_intermediate_velocity,
+    calculate_nu, calculate_nv, calculate_viscous_x, calculate_viscous_y,
     interpolate_u_to_cell_edges, interpolate_v_to_cell_edges,
-    calculate_nu, calculate_nv,
-    calculate_intermediate_velocity,
-    calculate_divergence_term,
-    apply_pressure_corrections,
 };
 use crate::poisson::solve_poisson_equation_direct;
-use crate::json_io::JsonOutputManager; // Import the manager
 
 #[derive(Debug)]
 pub struct Solver {
@@ -45,24 +37,30 @@ impl Solver {
         output_frequency: Option<usize>,
         output_filepath: Option<String>,
     ) -> Result<Self, SolverError> {
-        if re <= 0.0 { return Err(SolverError::InvalidParameter("Reynolds number must be positive".to_string())); }
-        if dt <= 0.0 { return Err(SolverError::InvalidParameter("Time step dt must be positive".to_string())); }
+        if re <= 0.0 {
+            return Err(SolverError::InvalidParameter(
+                "Reynolds number must be positive".to_string(),
+            ));
+        }
+        if dt <= 0.0 {
+            return Err(SolverError::InvalidParameter(
+                "Time step dt must be positive".to_string(),
+            ));
+        }
 
         let nx = grid.dimensions.0;
         let ny = grid.dimensions.1;
         let dx = grid.cell_size.0;
         let dy = grid.cell_size.1;
 
-        // Create Output Manager
         let output_manager = match output_filepath {
             Some(filepath) => {
-                // Pass dx, dy if needed by manager or its write function
                 match JsonOutputManager::new(filepath, output_frequency, nx, ny /*, dx, dy */) {
                     Ok(manager) => Some(manager),
                     Err(io_err) => {
-                        // --- Use the IoError variant (assuming it takes String) ---
                         return Err(SolverError::IoError(format!(
-                            "Failed to initialize JSON output manager: {}", io_err
+                            "Failed to initialize JSON output manager: {}",
+                            io_err
                         )));
                     }
                 }
@@ -70,23 +68,33 @@ impl Solver {
             None => None,
         };
 
-        info!("Solver initialized. Output enabled: {}", output_manager.is_some());
+        info!(
+            "Solver initialized. Output enabled: {}",
+            output_manager.is_some()
+        );
 
-        Ok(Self { grid, re, dt, time: 0.0, bcs, nx, ny, dx, dy, output_manager })
+        Ok(Self {
+            grid,
+            re,
+            dt,
+            time: 0.0,
+            bcs,
+            nx,
+            ny,
+            dx,
+            dy,
+            output_manager,
+        })
     }
 
-    // step method remains the same
     pub fn step(&mut self) -> Result<(), String> {
-        // --- Apply BCs to current velocity ---
-        self.grid.apply_lid_driven_bcs(1.0); // Apply specific BCs for lid
+        self.grid.apply_lid_driven_bcs(1.0);
 
-        // --- Calculate Viscous Terms ---
         let lux = calculate_viscous_x(&self.grid.u, self.dx);
         let luy = calculate_viscous_y(&self.grid.u, self.dy);
         let lvx = calculate_viscous_x(&self.grid.v, self.dx);
         let lvy = calculate_viscous_y(&self.grid.v, self.dy);
 
-        // --- Calculate Convective Terms ---
         let uce = crate::numerical::interpolate_u_to_cell_centers(&self.grid.u);
         let uco = interpolate_u_to_cell_edges(&self.grid.u);
         let vco = interpolate_v_to_cell_edges(&self.grid.v);
@@ -97,41 +105,52 @@ impl Solver {
         let nu = calculate_nu(&uuce, &uvco, self.dx, self.dy);
         let nv = calculate_nv(&vvce, &uvco, self.dx, self.dy);
 
-        // --- Predictor Step ---
         let (mut u_star, mut v_star) = calculate_intermediate_velocity(
-            &self.grid.u, &self.grid.v, &nu, &nv, &lux, &luy, &lvx, &lvy, self.dt, self.re
+            &self.grid.u,
+            &self.grid.v,
+            &nu,
+            &nv,
+            &lux,
+            &luy,
+            &lvx,
+            &lvy,
+            self.dt,
+            self.re,
         );
 
-         // --- Apply BCs to intermediate velocity ---
         {
             let mut temp_grid = self.grid.clone();
-            temp_grid.u = u_star.clone(); temp_grid.v = v_star.clone();
+            temp_grid.u = u_star.clone();
+            temp_grid.v = v_star.clone();
             temp_grid.apply_lid_driven_bcs(1.0);
-            u_star = temp_grid.u; v_star = temp_grid.v;
+            u_star = temp_grid.u;
+            v_star = temp_grid.v;
         }
 
-        // --- Calculate Divergence Term for Poisson ---
         let b = calculate_divergence_term(&u_star, &v_star, self.dx, self.dy);
         let rhs = b * (1.0 / self.dt);
 
-        // --- Solve Pressure Poisson Equation ---
-        let p_correction = match solve_poisson_equation_direct(&rhs, self.nx, self.ny, self.dx, self.dy, false) {
-            Ok(p) => p,
-            Err(e) => return Err(format!("Poisson solve failed: {}", e)),
-        };
+        let p_correction =
+            match solve_poisson_equation_direct(&rhs, self.nx, self.ny, self.dx, self.dy, false) {
+                Ok(p) => p,
+                Err(e) => return Err(format!("Poisson solve failed: {}", e)),
+            };
         self.grid.pressure = p_correction.clone();
 
-        // --- Corrector Step ---
         let p_correction_scaled = p_correction.scale(self.dt);
-        apply_pressure_corrections(&mut u_star, &mut v_star, &p_correction_scaled, self.dx, self.dy);
+        apply_pressure_corrections(
+            &mut u_star,
+            &mut v_star,
+            &p_correction_scaled,
+            self.dx,
+            self.dy,
+        );
 
-        // Update grid velocities
-        self.grid.u = u_star; self.grid.v = v_star;
+        self.grid.u = u_star;
+        self.grid.v = v_star;
 
-        // --- Final BCs ---
         self.grid.apply_lid_driven_bcs(1.0);
 
-        // --- Advance Time ---
         self.time += self.dt;
 
         Ok(())
@@ -141,21 +160,22 @@ impl Solver {
         let run_span = info_span!("simulation_run", num_steps = num_steps).entered();
         info!(
             "Starting simulation: {} steps, dt={}, Re={}, Output: {}",
-            num_steps, self.dt, self.re,
-            self.output_manager.as_ref().map_or("Disabled", |m| m.output_filepath.as_str())
+            num_steps,
+            self.dt,
+            self.re,
+            self.output_manager
+                .as_ref()
+                .map_or("Disabled", |m| m.output_filepath.as_str())
         );
         let start_time = Instant::now();
         let mut steps_completed = 0;
 
-        // --- Initial Data Collection (Step 0) ---
         if let Some(manager) = self.output_manager.as_mut() {
-             // Always pass false for is_final here, as it's step 0
-             if manager.should_collect(0, num_steps, false) {
-                 manager.collect_timestep(0, self.time, &self.grid)?;
-             }
+            if manager.should_collect(0, num_steps, false) {
+                manager.collect_timestep(0, self.time, &self.grid)?;
+            }
         }
 
-        // --- Time Stepping Loop ---
         for i in 0..num_steps {
             let current_step = i + 1;
             let step_span = info_span!("time_step", step = current_step).entered();
@@ -164,31 +184,47 @@ impl Solver {
             match self.step() {
                 Ok(_) => {
                     steps_completed += 1;
-                    let div_check_term = calculate_divergence_term(&self.grid.u, &self.grid.v, self.dx, self.dy);
+                    let div_check_term =
+                        calculate_divergence_term(&self.grid.u, &self.grid.v, self.dx, self.dy);
                     let div_norm = div_check_term.norm();
                     let step_time_elapsed = step_start.elapsed();
-                    info!("Step {}: div_norm = {:.2e}, time = {:.2}s", current_step, div_norm, step_time_elapsed.as_secs_f64());
+                    info!(
+                        "Step {}: div_norm = {:.2e}, time = {:.2}ms",
+                        current_step,
+                        div_norm,
+                        step_time_elapsed.as_secs_f64() * 1000.0
+                    );
 
-                    // --- Collect Data for Output ---
                     if let Some(manager) = self.output_manager.as_mut() {
-                        let is_final = current_step == num_steps; // Check if it's the last iteration
+                        let is_final = current_step == num_steps;
                         if manager.should_collect(current_step, num_steps, is_final) {
-                             if let Err(e) = manager.collect_timestep(current_step, self.time, &self.grid) {
-                                  warn!("Failed to collect timestep data for step {}: {}", current_step, e);
-                             }
+                            if let Err(e) =
+                                manager.collect_timestep(current_step, self.time, &self.grid)
+                            {
+                                warn!(
+                                    "Failed to collect timestep data for step {}: {}",
+                                    current_step, e
+                                );
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     let error_msg = format!("Error during step {}: {}", current_step, e);
                     error!(error=%e, step=current_step, "Simulation step failed");
-
-                    // Attempt to Write Partial Results on Error
                     if let Some(manager) = self.output_manager.as_ref() {
                         warn!("Attempting to write partial results due to simulation error...");
-                        if let Err(write_err) = manager.write_final_output(self.re, self.dt, self.dx, self.dy, steps_completed) {
+                        if let Err(write_err) = manager.write_final_output(
+                            self.re,
+                            self.dt,
+                            self.dx,
+                            self.dy,
+                            steps_completed,
+                        ) {
                             error!("Failed to write partial JSON output: {}", write_err);
-                        } else { info!("Partial results saved successfully."); }
+                        } else {
+                            info!("Partial results saved successfully.");
+                        }
                     }
                     return Err(io::Error::new(io::ErrorKind::Other, error_msg));
                 }
@@ -197,63 +233,66 @@ impl Solver {
         } // --- End Time Stepping Loop ---
 
         let total_time = start_time.elapsed();
-        info!("Simulation loop finished in {:.2}s", total_time.as_secs_f64());
-
-        // ===========================================================
-        // --- Simplified Final JSON Write Section ---
-        // ===========================================================
-        // Directly write whatever data was collected during the loop.
-        // No extra check or collection happens here.
+        info!(
+            "Simulation loop finished in {:.2}s",
+            total_time.as_secs_f64()
+        );
         if let Some(manager) = self.output_manager.as_ref() {
             info!("Writing final JSON output...");
             manager.write_final_output(self.re, self.dt, self.dx, self.dy, steps_completed)?;
         }
-        // ===========================================================
-        // --- End Simplified Section ---
-        // ===========================================================
 
         drop(run_span);
         Ok(())
     }
 }
 
-// --- Solver Tests ---
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::grid2d::{GridDimensions2D, CellSize2D};
-    use crate::boundary::bc2d::{BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary};
-    use tempfile::tempdir;
+    use crate::boundary::bc2d::{
+        BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary,
+    };
+    use crate::domain::grid2d::{CellSize2D, GridDimensions2D};
     use std::fs;
-    // use nalgebra::dmatrix; // Not needed if using basic grid setup
-    // use approx::assert_relative_eq; // Not needed for these tests
-
-    // Helper function to create a simple Grid2D for testing
+    use tempfile::tempdir;
     fn setup_test_grid_basic(nx: usize, ny: usize) -> Grid2D {
         let dims = GridDimensions2D(nx, ny);
-        let cell_size = CellSize2D(1.0/nx as f64, 1.0/ny as f64);
-        Grid2D::new(dims, cell_size).unwrap() // Initialize with zeros
+        let cell_size = CellSize2D(1.0 / nx as f64, 1.0 / ny as f64);
+        Grid2D::new(dims, cell_size).unwrap()
     }
 
-     // Helper function for basic boundary conditions
-     fn setup_test_bcs_basic() -> BoundaryConditions2D {
-         // --- Fix: Use struct literal syntax ---
-         let u_bc = SquareBoundary {
-             x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-             y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-         };
-         let v_bc = SquareBoundary {
-             x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-             y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-         };
-         let p_bc = SquareBoundary {
-             x: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
-             y: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
-         };
-         // --- End Fix ---
-         BoundaryConditions2D { u: u_bc, v: v_bc, p: p_bc }
-     }
-
+    fn setup_test_bcs_basic() -> BoundaryConditions2D {
+        let u_bc = SquareBoundary {
+            x: FaceBoundary(
+                BoundaryCondition::Dirichlet(0.0),
+                BoundaryCondition::Dirichlet(0.0),
+            ),
+            y: FaceBoundary(
+                BoundaryCondition::Dirichlet(0.0),
+                BoundaryCondition::Dirichlet(0.0),
+            ),
+        };
+        let v_bc = SquareBoundary {
+            x: FaceBoundary(
+                BoundaryCondition::Dirichlet(0.0),
+                BoundaryCondition::Dirichlet(0.0),
+            ),
+            y: FaceBoundary(
+                BoundaryCondition::Dirichlet(0.0),
+                BoundaryCondition::Dirichlet(0.0),
+            ),
+        };
+        let p_bc = SquareBoundary {
+            x: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
+            y: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
+        };
+        BoundaryConditions2D {
+            u: u_bc,
+            v: v_bc,
+            p: p_bc,
+        }
+    }
 
     #[test]
     fn test_solver_new_with_output_manager() -> Result<(), Box<dyn std::error::Error>> {
@@ -267,7 +306,6 @@ mod tests {
 
         assert!(solver.output_manager.is_some());
         let manager = solver.output_manager.unwrap();
-        // Access public fields
         assert_eq!(manager.output_frequency, Some(10));
         assert_eq!(manager.output_filepath, filepath_str);
         assert_eq!(manager.nx, 5);
@@ -281,46 +319,55 @@ mod tests {
     fn test_solver_new_output_disabled() -> Result<(), SolverError> {
         let grid = setup_test_grid_basic(5, 5);
         let bcs = setup_test_bcs_basic();
-        let solver = Solver::new(grid, 100.0, 0.1, bcs, Some(10), None)?; // Pass None for path
+        let solver = Solver::new(grid, 100.0, 0.1, bcs, Some(10), None)?;
         assert!(solver.output_manager.is_none());
         Ok(())
     }
 
+    #[test]
+    fn test_solver_run_with_json_integration() -> Result<(), Box<dyn std::error::Error>> {
+        let nx = 4;
+        let ny = 3;
+        let grid = setup_test_grid_basic(nx, ny);
+        let bcs = setup_test_bcs_basic();
+        let dir = tempdir()?;
+        let filepath = dir.path().join("solver_run_output.json");
+        let filepath_str = filepath.to_str().unwrap().to_string();
+        let output_freq = 2;
+        let num_steps = 5;
 
-     #[test]
-     fn test_solver_run_with_json_integration() -> Result<(), Box<dyn std::error::Error>> {
-         let nx = 4; let ny = 3;
-         let grid = setup_test_grid_basic(nx, ny);
-         let bcs = setup_test_bcs_basic();
-         let dir = tempdir()?;
-         let filepath = dir.path().join("solver_run_output.json");
-         let filepath_str = filepath.to_str().unwrap().to_string();
-         let output_freq = 2;
-         let num_steps = 5;
+        let mut solver = Solver::new(
+            grid,
+            50.0,
+            0.05,
+            bcs,
+            Some(output_freq),
+            Some(filepath_str.clone()),
+        )?;
+        solver.run(num_steps)?;
 
-         let mut solver = Solver::new(grid, 50.0, 0.05, bcs, Some(output_freq), Some(filepath_str.clone()))?;
-         solver.run(num_steps)?; // Expect Ok
+        assert!(filepath.exists());
+        let json_content = fs::read_to_string(filepath)?;
+        let output_value: serde_json::Value = serde_json::from_str(&json_content)?;
 
-         assert!(filepath.exists());
-         let json_content = fs::read_to_string(filepath)?;
-         let output_value: serde_json::Value = serde_json::from_str(&json_content)?;
+        assert_eq!(output_value["metadata"]["nx"], nx);
+        assert_eq!(output_value["metadata"]["re"], 50.0);
+        assert_eq!(output_value["metadata"]["num_steps_completed"], num_steps);
+        assert_eq!(output_value["metadata"]["output_frequency"], output_freq);
 
-         assert_eq!(output_value["metadata"]["nx"], nx);
-         assert_eq!(output_value["metadata"]["re"], 50.0);
-         assert_eq!(output_value["metadata"]["num_steps_completed"], num_steps);
-         assert_eq!(output_value["metadata"]["output_frequency"], output_freq);
-
-         let expected_steps = vec![0, 2, 4, 5];
-         let data_array = output_value["data"].as_array().expect("Data field not an array");
-         assert_eq!(data_array.len(), expected_steps.len());
-         for (i, step) in expected_steps.iter().enumerate() {
-             assert_eq!(data_array[i]["step"], *step as i64);
-             assert_eq!(data_array[i]["u_centers"].as_array().unwrap().len(), nx*ny);
-         }
-         dir.close()?;
-         Ok(())
-     }
-
-    // Keep other tests like test_solver_step, but ensure Solver::new uses None for output path
-    // e.g., let mut solver = Solver::new(grid, 100.0, 0.1, bcs, None, None).unwrap();
+        let expected_steps = vec![0, 2, 4, 5];
+        let data_array = output_value["data"]
+            .as_array()
+            .expect("Data field not an array");
+        assert_eq!(data_array.len(), expected_steps.len());
+        for (i, step) in expected_steps.iter().enumerate() {
+            assert_eq!(data_array[i]["step"], *step as i64);
+            assert_eq!(
+                data_array[i]["u_centers"].as_array().unwrap().len(),
+                nx * ny
+            );
+        }
+        dir.close()?;
+        Ok(())
+    }
 }

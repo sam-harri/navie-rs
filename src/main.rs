@@ -1,18 +1,17 @@
-// src/main.rs
-
-// Import necessary modules from your crate
-mod domain;
 mod boundary;
+mod domain;
 mod error;
+mod json_io;
 mod numerical;
-mod solver;
 mod poisson;
-mod json_io; // <-- Make sure this is declared
+mod solver;
 
-use crate::domain::grid2d::{Grid2D, GridDimensions2D, CellSize2D};
-use crate::boundary::bc2d::{BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary};
-use crate::solver::Solver; // Use the solver
-use tracing::{info, error, Level}; // Added error
+use crate::boundary::bc2d::{
+    BoundaryCondition, BoundaryConditions2D, FaceBoundary, SquareBoundary,
+};
+use crate::domain::grid2d::{CellSize2D, Grid2D, GridDimensions2D};
+use crate::solver::Solver;
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,48 +24,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Setting up Lid-Driven Cavity Simulation...");
 
-    // --- Simulation Parameters ---
-    let re = 500.0;
-    let num_steps = 10000; // Reduced for quicker testing initially?
-    let dt = 0.001;
-    let grid_dims = GridDimensions2D(80, 80);
-    let cell_size = CellSize2D(1.0 / grid_dims.0 as f64, 1.0 / grid_dims.1 as f64);
+    let re = 1000.0;
+    let num_steps = 20000;
+    let dt = 0.002;
+    let grid_dims = GridDimensions2D(100, 50);
+    let cell_size = CellSize2D(1.0 / grid_dims.1 as f64, 1.0 / grid_dims.1 as f64);
 
-    // --- Output Parameters ---
-    let output_frequency = Some(250); // Output every 100 steps (use Some(0) for initial/final only, None to disable)
-    let output_filename = Some("output/lid_driven_results_refactored.json".to_string()); // Path relative to execution dir
+    let output_frequency = Some(250);
+    let output_filename = Some("output/wide.json".to_string());
 
-    // --- Initial Conditions & Grid ---
     let grid = Grid2D::new(grid_dims, cell_size)?;
 
-    // --- Boundary Conditions ---
     let lid_velocity = 1.0;
     let u_bc = SquareBoundary {
-        x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-        y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(lid_velocity)),
+        x: FaceBoundary(
+            BoundaryCondition::Dirichlet(0.0),
+            BoundaryCondition::Dirichlet(0.0),
+        ),
+        y: FaceBoundary(
+            BoundaryCondition::Dirichlet(0.0),
+            BoundaryCondition::Dirichlet(lid_velocity),
+        ),
     };
     let v_bc = SquareBoundary {
-        x: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
-        y: FaceBoundary(BoundaryCondition::Dirichlet(0.0), BoundaryCondition::Dirichlet(0.0)),
+        x: FaceBoundary(
+            BoundaryCondition::Dirichlet(0.0),
+            BoundaryCondition::Dirichlet(0.0),
+        ),
+        y: FaceBoundary(
+            BoundaryCondition::Dirichlet(0.0),
+            BoundaryCondition::Dirichlet(0.0),
+        ),
     };
     let p_bc = SquareBoundary {
         x: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
         y: FaceBoundary(BoundaryCondition::Neumann, BoundaryCondition::Neumann),
     };
-    let bcs = BoundaryConditions2D { u: u_bc, v: v_bc, p: p_bc };
+    let bcs = BoundaryConditions2D {
+        u: u_bc,
+        v: v_bc,
+        p: p_bc,
+    };
 
-    // --- Create Solver ---
-    // Pass the output config options directly to Solver::new
     let mut solver = Solver::new(
         grid,
         re,
         dt,
         bcs.clone(),
-        output_frequency, // Pass Option<usize>
-        output_filename.clone(), // Pass Option<String> (clone if needed later)
+        output_frequency,
+        output_filename.clone(),
     )?;
 
-    // --- Run Simulation ---
     match solver.run(num_steps) {
         Ok(()) => info!(
             "Simulation completed successfully. Output written to {}",
@@ -76,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let filename = output_filename.unwrap_or_else(|| "N/A".to_string());
             error!("Simulation failed: {}", e);
             error!("Partial results might be available in {}", filename);
-            return Err(Box::new(e)); // Propagate the error
+            return Err(Box::new(e));
         }
     }
 
